@@ -4,6 +4,7 @@ const providerConfigEl = document.getElementById('provider-config');
 const providerFormFieldsEl = document.getElementById('provider-form-fields');
 const logsEl = document.getElementById('logs');
 const publishChecksEl = document.getElementById('publish-checks');
+const urlInputEl = document.getElementById('url');
 
 let providers = [];
 let providerTemplates = {};
@@ -164,6 +165,39 @@ function publishPayloadFromForm() {
   };
 }
 
+async function fetchUrlMetaAndFill(force = false) {
+  const url = urlInputEl.value.trim();
+  if (!url) {
+    alert('Önce URL gir.');
+    return;
+  }
+  try {
+    const data = await api(`/api/url-meta?url=${encodeURIComponent(url)}`);
+    if (!data.ok) {
+      alert('URL metadata alınamadı.');
+      return;
+    }
+    const titleEl = document.getElementById('title');
+    const textEl = document.getElementById('text_body');
+    const imageEl = document.getElementById('image_url');
+
+    if (data.canonical_url) {
+      urlInputEl.value = data.canonical_url;
+    }
+    if (force || !titleEl.value.trim()) {
+      titleEl.value = data.title || titleEl.value;
+    }
+    if (force || !textEl.value.trim()) {
+      textEl.value = data.description || textEl.value;
+    }
+    if (force || !imageEl.value.trim()) {
+      imageEl.value = data.image_url || imageEl.value;
+    }
+  } catch (err) {
+    alert(`URL metadata hatası: ${err.message}`);
+  }
+}
+
 function renderPublishChecks(items) {
   publishChecksEl.innerHTML = '';
   if (!items || !items.length) return;
@@ -243,6 +277,10 @@ document.getElementById('publish-form').addEventListener('submit', async (e) => 
   }
 });
 
+document.getElementById('fetch-url-meta').addEventListener('click', async () => {
+  await fetchUrlMetaAndFill(true);
+});
+
 document.getElementById('load-template').addEventListener('click', async () => {
   const provider = getSelectedProviderKey();
   try {
@@ -301,6 +339,11 @@ providerSelectEl.addEventListener('change', async () => {
   const provider = getSelectedProviderKey();
   if (!provider) return;
   await loadProviderConfigIntoEditor(provider);
+});
+
+urlInputEl.addEventListener('blur', async () => {
+  if (!urlInputEl.value.trim()) return;
+  await fetchUrlMetaAndFill(false);
 });
 
 (async function init() {

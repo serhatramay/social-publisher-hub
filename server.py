@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
+from html import unescape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -105,6 +107,18 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def default_headers(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
+    base = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
+        )
+    }
+    if extra:
+        base.update(extra)
+    return base
 
 
 def get_conn() -> sqlite3.Connection:
@@ -384,7 +398,7 @@ def db_recent_deliveries(limit: int = 100) -> list[dict[str, Any]]:
 
 def http_json(method: str, url: str, payload: dict[str, Any], headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
     data = json.dumps(payload).encode("utf-8")
-    req_headers = {"Content-Type": "application/json", **headers}
+    req_headers = default_headers({"Content-Type": "application/json", **headers})
     req = Request(url, data=data, headers=req_headers, method=method)
     try:
         with urlopen(req, timeout=20) as resp:
@@ -405,7 +419,7 @@ def http_json(method: str, url: str, payload: dict[str, Any], headers: dict[str,
 
 
 def http_get_json(url: str, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
-    req = Request(url, headers=headers, method="GET")
+    req = Request(url, headers=default_headers(headers), method="GET")
     try:
         with urlopen(req, timeout=20) as resp:
             raw = resp.read().decode("utf-8", errors="ignore")
@@ -426,7 +440,7 @@ def http_get_json(url: str, headers: dict[str, str]) -> tuple[int, dict[str, Any
 
 def http_form(method: str, url: str, form: dict[str, str], headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
     encoded = urlencode(form).encode("utf-8")
-    req_headers = {"Content-Type": "application/x-www-form-urlencoded", **headers}
+    req_headers = default_headers({"Content-Type": "application/x-www-form-urlencoded", **headers})
     req = Request(url, data=encoded, headers=req_headers, method=method)
     try:
         with urlopen(req, timeout=20) as resp:
@@ -442,6 +456,122 @@ def http_form(method: str, url: str, form: dict[str, str], headers: dict[str, st
         return exc.code, {"error": str(exc), "body": raw}
     except URLError as exc:
         return 599, {"error": str(exc)}
+
+
+def http_get_text(url: str, headers: Optional[dict[str, str]] = None) -> tuple[int, str, str]:
+    req = Request(url, headers=default_headers(headers or {}), method="GET")
+    try:
+        with urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+            charset = "utf-8"
+            try:
+                charset = resp.headers.get_content_charset() or "utf-8"
+            except Exception:
+                pass
+            return resp.status, raw.decode(charset, errors="ignore"), str(resp.geturl())
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="ignore")
+        return exc.code, raw, url
+    except URLError:
+        return 599, "", url
+
+
+def http_get_binary(url: str, headers: Optional[dict[str, str]] = None) -> tuple[int, bytes, str, str]:
+    req = Request(url, headers=default_headers(headers or {}), method="GET")
+    try:
+        with urlopen(req, timeout=20) as resp:
+            content_type = resp.headers.get_content_type() or "application/octet-stream"
+            return resp.status, resp.read(), content_type, str(resp.geturl())
+    except HTTPError as exc:
+        return exc.code, exc.read(), "application/octet-stream", url
+    except URLError:
+        return 599, b"", "application/octet-stream", url
+
+
+def clean_url(url: str) -> str:
+    try:
+        parsed = urlparse((url or "").strip())
+        if not parsed.scheme:
+            return url.strip()
+        q = parse_qs(parsed.query, keep_blank_values=True)
+        blocked = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid"}
+        filtered_items: list[tuple[str, str]] = []
+        for k, values in q.items():
+            if k.lower() in blocked:
+                continue
+            for v in values:
+                filtered_items.append((k, v))
+        fragment = "" if (parsed.fragment or "").lower() in {"google_vignette"} else parsed.fragment
+        new_query = urlencode(filtered_items, doseq=True)
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, fragment))
+    except Exception:
+        return url.strip()
+
+
+def _find_meta(html: str, names: list[str]) -> str:
+    for name in names:
+        patterns = [
+            rf'<meta[^>]+property=["\\\']{re.escape(name)}["\\\'][^>]+content=["\\\'](.*?)["\\\']',
+            rf'<meta[^>]+content=["\\\'](.*?)["\\\'][^>]+property=["\\\']{re.escape(name)}["\\\']',
+            rf'<meta[^>]+name=["\\\']{re.escape(name)}["\\\'][^>]+content=["\\\'](.*?)["\\\']',
+            rf'<meta[^>]+content=["\\\'](.*?)["\\\'][^>]+name=["\\\']{re.escape(name)}["\\\']',
+        ]
+        for pat in patterns:
+            m = re.search(pat, html, flags=re.I | re.S)
+            if m:
+                return unescape(re.sub(r"\s+", " ", m.group(1))).strip()
+    return ""
+
+
+def _find_title(html: str) -> str:
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.I | re.S)
+    if not m:
+        return ""
+    return unescape(re.sub(r"\s+", " ", m.group(1))).strip()
+
+
+def _find_canonical(html: str, base_url: str) -> str:
+    m = re.search(
+        r'<link[^>]+rel=["\\\']canonical["\\\'][^>]+href=["\\\'](.*?)["\\\']',
+        html,
+        flags=re.I | re.S,
+    )
+    if not m:
+        m = re.search(
+            r'<link[^>]+href=["\\\'](.*?)["\\\'][^>]+rel=["\\\']canonical["\\\']',
+            html,
+            flags=re.I | re.S,
+        )
+    if not m:
+        return ""
+    return urljoin(base_url, unescape(m.group(1)).strip())
+
+
+def fetch_url_metadata(url: str) -> dict[str, Any]:
+    normalized = clean_url(url)
+    if not normalized.startswith(("http://", "https://")):
+        return {"ok": False, "error": "url http/https ile baslamali"}
+
+    status, html, final_url = http_get_text(normalized)
+    if not (200 <= status < 300) or not html:
+        return {"ok": False, "status": status, "error": "URL okunamadi"}
+
+    title = _find_meta(html, ["og:title", "twitter:title"]) or _find_title(html)
+    desc = _find_meta(html, ["og:description", "description", "twitter:description"])
+    image = _find_meta(html, ["og:image", "twitter:image"])
+    canonical = _find_canonical(html, final_url) or final_url
+    if image:
+        image = urljoin(final_url, image)
+
+    return {
+        "ok": True,
+        "url": normalized,
+        "final_url": final_url,
+        "canonical_url": clean_url(canonical),
+        "title": title,
+        "description": desc,
+        "image_url": image,
+    }
 
 
 def post_mastodon(config: dict[str, Any], post: dict[str, str]) -> tuple[str, str, dict[str, Any]]:
@@ -464,6 +594,34 @@ def post_mastodon(config: dict[str, Any], post: dict[str, str]) -> tuple[str, st
     return "failed", "", {"status": status, "detail": resp}
 
 
+def _bluesky_upload_blob(access_jwt: str, image_url: str) -> tuple[bool, dict[str, Any]]:
+    status, data, content_type, _ = http_get_binary(image_url)
+    if not (200 <= status < 300) or not data:
+        return False, {"error": "thumb indirilemedi", "status": status}
+    if len(data) > 900_000:
+        return False, {"error": "thumb cok buyuk", "bytes": len(data)}
+    req = Request(
+        "https://bsky.social/xrpc/com.atproto.repo.uploadBlob",
+        data=data,
+        headers=default_headers(
+            {
+                "Authorization": f"Bearer {access_jwt}",
+                "Content-Type": content_type or "application/octet-stream",
+            }
+        ),
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+            return True, json.loads(raw) if raw else {}
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="ignore")
+        return False, {"error": str(exc), "body": raw}
+    except URLError as exc:
+        return False, {"error": str(exc)}
+
+
 def post_bluesky(config: dict[str, Any], post: dict[str, str]) -> tuple[str, str, dict[str, Any]]:
     identifier = config.get("identifier", "").strip()
     app_password = config.get("app_password", "").strip()
@@ -481,15 +639,55 @@ def post_bluesky(config: dict[str, Any], post: dict[str, str]) -> tuple[str, str
 
     access_jwt = login_resp.get("accessJwt", "")
     did = login_resp.get("did", "")
-    text = f"{post['title']}\n{post['url']}"
+    clean_post_url = clean_url(post["url"])
+    title = (post.get("title") or "").strip()
+    desc = (post.get("text_body") or "").strip()
+    text = f"{title}\n{clean_post_url}".strip()
+    if len(text) > 300:
+        reserve = len(clean_post_url) + 1
+        title_cut = max(0, 300 - reserve)
+        text = f"{title[:title_cut].rstrip()}\n{clean_post_url}".strip()
+    text_bytes = text.encode("utf-8")
+    url_bytes = clean_post_url.encode("utf-8")
+    start = text_bytes.rfind(url_bytes)
+
+    facets = []
+    if start >= 0:
+        facets.append(
+            {
+                "index": {"byteStart": start, "byteEnd": start + len(url_bytes)},
+                "features": [{"$type": "app.bsky.richtext.facet#link", "uri": clean_post_url}],
+            }
+        )
+
+    record: dict[str, Any] = {
+        "$type": "app.bsky.feed.post",
+        "text": text,
+        "createdAt": now_iso(),
+    }
+    if facets:
+        record["facets"] = facets
+
+    external: dict[str, Any] = {
+        "uri": clean_post_url,
+        "title": title[:300] or clean_post_url,
+        "description": desc[:1000],
+    }
+    image_url = (post.get("image_url") or "").strip()
+    thumb_upload_info: dict[str, Any] = {}
+    if image_url:
+        ok, blob_resp = _bluesky_upload_blob(access_jwt, image_url)
+        if ok and blob_resp.get("blob"):
+            external["thumb"] = blob_resp["blob"]
+            thumb_upload_info = {"thumb_uploaded": True}
+        else:
+            thumb_upload_info = {"thumb_uploaded": False, "thumb_error": blob_resp}
+
+    record["embed"] = {"$type": "app.bsky.embed.external", "external": external}
     create_payload = {
         "repo": did,
         "collection": "app.bsky.feed.post",
-        "record": {
-            "$type": "app.bsky.feed.post",
-            "text": text[:300],
-            "createdAt": now_iso(),
-        },
+        "record": record,
     }
 
     create_status, create_resp = http_json(
@@ -499,8 +697,10 @@ def post_bluesky(config: dict[str, Any], post: dict[str, str]) -> tuple[str, str
         {"Authorization": f"Bearer {access_jwt}"},
     )
     if 200 <= create_status < 300:
+        if thumb_upload_info:
+            create_resp["_thumb"] = thumb_upload_info
         return "ok", str(create_resp.get("uri", "")), create_resp
-    return "failed", "", {"step": "createRecord", "status": create_status, "detail": create_resp}
+    return "failed", "", {"step": "createRecord", "status": create_status, "detail": create_resp, **thumb_upload_info}
 
 
 def test_provider(provider_key: str, config: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -781,6 +981,14 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/deliveries":
             return json_response(self, {"items": db_recent_deliveries()})
 
+        if parsed.path == "/api/url-meta":
+            qs = parse_qs(parsed.query)
+            raw_url = (qs.get("url", [""])[0] or "").strip()
+            if not raw_url:
+                return json_response(self, {"error": "url param zorunlu"}, status=400)
+            meta = fetch_url_metadata(raw_url)
+            return json_response(self, meta, status=200 if meta.get("ok") else 400)
+
         if parsed.path == "/api/provider-config":
             qs = parse_qs(parsed.query)
             provider_key = (qs.get("provider", [""])[0] or "").strip()
@@ -891,7 +1099,7 @@ class AppHandler(BaseHTTPRequestHandler):
             try:
                 body = parse_json_body(self)
                 title = str(body.get("title", "")).strip()
-                url = str(body.get("url", "")).strip()
+                url = clean_url(str(body.get("url", "")).strip())
                 text_body = str(body.get("text_body", "")).strip()
                 image_url = str(body.get("image_url", "")).strip()
                 providers = body.get("providers", [])
@@ -935,6 +1143,21 @@ class AppHandler(BaseHTTPRequestHandler):
                     return json_response(self, {"error": "en az bir provider secilmeli"}, status=400)
                 if not (url.startswith("http://") or url.startswith("https://")):
                     return json_response(self, {"error": "url http/https ile baslamali"}, status=400)
+
+                # URL verildiyse, bos alanlari otomatik doldurmaya calis.
+                if not title or not text_body or not image_url:
+                    meta = fetch_url_metadata(url)
+                    if meta.get("ok"):
+                        url = meta.get("canonical_url") or url
+                        if not title:
+                            title = str(meta.get("title", "")).strip()
+                        if not text_body:
+                            text_body = str(meta.get("description", "")).strip()
+                        if not image_url:
+                            image_url = str(meta.get("image_url", "")).strip()
+
+                if not title:
+                    return json_response(self, {"error": "Baslik bulunamadi. URL metadata cekilemedi; baslik gir."}, status=400)
 
                 validation_errors = []
                 for provider_key in providers:
