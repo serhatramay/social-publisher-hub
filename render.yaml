@@ -1,10 +1,9 @@
 services:
   - type: web
-    name: social-publisher
-    env: python
-    plan: free
-    region: frankfurt
-    buildCommand: ""
-    startCommand: python server.py
-    rootDir: social-publisher
-    autoDeploy: true
+      name: social-publisher
+          env: python
+              plan: free
+                  region: frankfurt
+                      buildCommand: "pip install flask"
+                          startCommand: python server.py
+                              autoDeploy: true
