@@ -176,6 +176,48 @@ button:hover {
   margin: -4px 0 8px;
 }
 
+.provider-connect-panel {
+  margin-bottom: 10px;
+}
+
+.provider-connect-actions {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.provider-connect-status {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.page-picker {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: #fafafa;
+}
+
+.page-picker-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  border-bottom: 1px solid #eee;
+  padding: 8px 0;
+}
+
+.page-picker-row:last-child {
+  border-bottom: none;
+}
+
+.page-picker-row button {
+  width: auto;
+  margin: 0;
+  padding: 8px 12px;
+}
+
 .advanced-config {
   border: 1px solid var(--border);
   border-radius: 8px;

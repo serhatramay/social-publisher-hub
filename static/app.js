@@ -2,12 +2,14 @@ const providerListEl = document.getElementById('provider-list');
 const providerSelectEl = document.getElementById('provider-select');
 const providerConfigEl = document.getElementById('provider-config');
 const providerFormFieldsEl = document.getElementById('provider-form-fields');
+const providerConnectPanelEl = document.getElementById('provider-connect-panel');
 const logsEl = document.getElementById('logs');
 const publishChecksEl = document.getElementById('publish-checks');
 const urlInputEl = document.getElementById('url');
 
 let providers = [];
 let providerTemplates = {};
+let pendingFacebookState = null;
 
 const providerFieldSchemas = {
   bluesky: [
@@ -44,6 +46,15 @@ function getSelectedProviderKey() {
   return providerSelectEl.value;
 }
 
+function setSearchParamsWithoutReload(params) {
+  const url = new URL(window.location.href);
+  Object.entries(params).forEach(([key, val]) => {
+    if (val === null || val === undefined || val === '') url.searchParams.delete(key);
+    else url.searchParams.set(key, val);
+  });
+  window.history.replaceState({}, '', url.toString());
+}
+
 function renderProviderConfigFields(providerKey, values = {}) {
   providerFormFieldsEl.innerHTML = '';
   const schema = providerFieldSchemas[providerKey];
@@ -73,6 +84,81 @@ function renderProviderConfigFields(providerKey, values = {}) {
     providerFormFieldsEl.appendChild(label);
     providerFormFieldsEl.appendChild(input);
   });
+}
+
+function renderProviderConnectPanel(providerKey, providerConfig = {}) {
+  providerConnectPanelEl.innerHTML = '';
+  if (providerKey !== 'facebook') return;
+
+  const status = document.createElement('div');
+  status.className = 'provider-connect-status';
+  status.textContent = providerConfig.page_name
+    ? `Bağlı sayfa: ${providerConfig.page_name} (${providerConfig.page_id || ''})`
+    : 'Kolay yöntem: "Facebook ile Bağlan" ile page ve token otomatik alınır.';
+  providerConnectPanelEl.appendChild(status);
+
+  const actions = document.createElement('div');
+  actions.className = 'provider-connect-actions';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = 'Facebook ile Bağlan';
+  btn.addEventListener('click', async () => {
+    try {
+      const res = await api('/api/facebook/connect-url');
+      if (!res.url) {
+        alert(`Facebook connect hazır değil: ${JSON.stringify(res)}`);
+        return;
+      }
+      window.location.href = res.url;
+    } catch (err) {
+      alert(`Facebook connect hatası: ${err.message}`);
+    }
+  });
+  actions.appendChild(btn);
+  providerConnectPanelEl.appendChild(actions);
+}
+
+function renderFacebookPagePicker(state, pages = []) {
+  const wrap = document.createElement('div');
+  wrap.className = 'page-picker';
+  wrap.innerHTML = '<div class="provider-form-help">Facebook sayfanı seç (token otomatik kaydedilir):</div>';
+
+  if (!pages.length) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-form-help';
+    empty.textContent = 'Sayfa bulunamadı. Yönetici olduğun bir page hesabı seçilmiş olmalı.';
+    wrap.appendChild(empty);
+  }
+
+  pages.forEach((p) => {
+    const row = document.createElement('div');
+    row.className = 'page-picker-row';
+    const title = document.createElement('div');
+    title.textContent = `${p.name} (${p.id})`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Seç';
+    btn.addEventListener('click', async () => {
+      try {
+        await api('/api/facebook/select-page', {
+          method: 'POST',
+          body: JSON.stringify({ state, page_id: p.id }),
+        });
+        alert(`Facebook Page bağlandı: ${p.name}`);
+        pendingFacebookState = null;
+        setSearchParamsWithoutReload({ fb_connect_state: null, fb_connect_status: null, provider: 'facebook' });
+        providerSelectEl.value = 'facebook';
+        await loadProviders();
+      } catch (err) {
+        alert(`Facebook sayfa seçme hatası: ${err.message}`);
+      }
+    });
+    row.appendChild(title);
+    row.appendChild(btn);
+    wrap.appendChild(row);
+  });
+
+  providerConnectPanelEl.appendChild(wrap);
 }
 
 function collectGuidedConfig(providerKey) {
@@ -105,9 +191,11 @@ async function loadProviderConfigIntoEditor(providerKey) {
     providerTemplates[providerKey] = template;
     const merged = { ...template, ...current };
     renderProviderConfigFields(providerKey, merged);
+    renderProviderConnectPanel(providerKey, merged);
     providerConfigEl.value = JSON.stringify(merged, null, 2);
   } catch (err) {
     renderProviderConfigFields(providerKey, {});
+    renderProviderConnectPanel(providerKey, {});
     providerConfigEl.value = '{}';
     alert(`Config yükleme hatası: ${err.message}`);
   }
@@ -346,7 +434,34 @@ urlInputEl.addEventListener('blur', async () => {
   await fetchUrlMetaAndFill(false);
 });
 
+async function handleFacebookConnectCallbackIfAny() {
+  const url = new URL(window.location.href);
+  const state = url.searchParams.get('fb_connect_state') || '';
+  if (!state) return;
+  pendingFacebookState = state;
+  try {
+    const result = await api(`/api/facebook/connect-result?state=${encodeURIComponent(state)}`);
+    providerSelectEl.value = 'facebook';
+    await loadProviderConfigIntoEditor('facebook');
+
+    if (result.status === 'ok') {
+      renderFacebookPagePicker(state, result.pages || []);
+      if (url.searchParams.get('fb_connect_status') === 'ok') {
+        alert('Facebook bağlantısı alındı. Şimdi sayfanı seç.');
+      }
+      return;
+    }
+    if (result.status === 'error') {
+      alert(`Facebook bağlantı hatası: ${result.error || 'Bilinmeyen hata'}`);
+      return;
+    }
+  } catch (err) {
+    alert(`Facebook callback okuma hatası: ${err.message}`);
+  }
+}
+
 (async function init() {
   await loadProviders();
   await loadLogs();
+  await handleFacebookConnectCallbackIfAny();
 })();

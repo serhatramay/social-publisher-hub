@@ -3,6 +3,8 @@ import json
 import os
 import re
 import sqlite3
+import secrets
+import time
 from datetime import datetime, timezone
 from html import unescape
 from http import HTTPStatus
@@ -19,6 +21,12 @@ DB_PATH = BASE_DIR / "social_publisher.db"
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8081"))
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+FACEBOOK_APP_ID = os.getenv("FACEBOOK_APP_ID", "").strip()
+FACEBOOK_APP_SECRET = os.getenv("FACEBOOK_APP_SECRET", "").strip()
+FACEBOOK_GRAPH_VERSION = "v21.0"
+OAUTH_STATE_TTL_SECONDS = 900
+FACEBOOK_OAUTH_SESSIONS: dict[str, dict[str, Any]] = {}
 
 PROVIDER_SPECS: dict[str, dict[str, Any]] = {
     "mastodon": {
@@ -107,6 +115,32 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def cleanup_oauth_sessions() -> None:
+    cutoff = time.time() - OAUTH_STATE_TTL_SECONDS
+    stale = [k for k, v in FACEBOOK_OAUTH_SESSIONS.items() if float(v.get("created_ts", 0)) < cutoff]
+    for key in stale:
+        FACEBOOK_OAUTH_SESSIONS.pop(key, None)
+
+
+def get_effective_base_url(handler: Optional[BaseHTTPRequestHandler] = None) -> str:
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
+    if handler is None:
+        return ""
+    host = handler.headers.get("Host", "").strip()
+    proto = handler.headers.get("X-Forwarded-Proto", "https").strip() or "https"
+    if not host:
+        return ""
+    return f"{proto}://{host}"
+
+
+def facebook_redirect_uri(handler: Optional[BaseHTTPRequestHandler] = None) -> str:
+    base = get_effective_base_url(handler)
+    if not base:
+        return ""
+    return f"{base}/auth/facebook/callback"
 
 
 def default_headers(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
@@ -574,6 +608,69 @@ def fetch_url_metadata(url: str) -> dict[str, Any]:
     }
 
 
+def facebook_connect_enabled(handler: Optional[BaseHTTPRequestHandler] = None) -> tuple[bool, list[str], str]:
+    missing = []
+    if not FACEBOOK_APP_ID:
+        missing.append("FACEBOOK_APP_ID")
+    if not FACEBOOK_APP_SECRET:
+        missing.append("FACEBOOK_APP_SECRET")
+    redirect_uri = facebook_redirect_uri(handler)
+    if not redirect_uri:
+        missing.append("PUBLIC_BASE_URL")
+    return (len(missing) == 0), missing, redirect_uri
+
+
+def create_facebook_oauth_state() -> str:
+    cleanup_oauth_sessions()
+    state = secrets.token_urlsafe(24)
+    FACEBOOK_OAUTH_SESSIONS[state] = {
+        "created_ts": time.time(),
+        "status": "pending",
+        "pages": [],
+        "error": "",
+    }
+    return state
+
+
+def build_facebook_auth_url(handler: BaseHTTPRequestHandler) -> tuple[bool, dict[str, Any]]:
+    enabled, missing, redirect_uri = facebook_connect_enabled(handler)
+    if not enabled:
+        return False, {"error": "Facebook OAuth env eksik", "missing_env": missing}
+    state = create_facebook_oauth_state()
+    query = urlencode(
+        {
+            "client_id": FACEBOOK_APP_ID,
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "response_type": "code",
+            "scope": "pages_show_list,pages_manage_posts,pages_read_engagement",
+        }
+    )
+    return True, {"state": state, "url": f"https://www.facebook.com/{FACEBOOK_GRAPH_VERSION}/dialog/oauth?{query}"}
+
+
+def facebook_exchange_code_for_user_token(code: str, redirect_uri: str) -> tuple[int, dict[str, Any]]:
+    query = urlencode(
+        {
+            "client_id": FACEBOOK_APP_ID,
+            "client_secret": FACEBOOK_APP_SECRET,
+            "redirect_uri": redirect_uri,
+            "code": code,
+        }
+    )
+    return http_get_json(f"https://graph.facebook.com/{FACEBOOK_GRAPH_VERSION}/oauth/access_token?{query}", {})
+
+
+def facebook_fetch_pages(user_access_token: str) -> tuple[int, dict[str, Any]]:
+    query = urlencode(
+        {
+            "fields": "name,id,access_token",
+            "access_token": user_access_token,
+        }
+    )
+    return http_get_json(f"https://graph.facebook.com/{FACEBOOK_GRAPH_VERSION}/me/accounts?{query}", {})
+
+
 def post_mastodon(config: dict[str, Any], post: dict[str, str]) -> tuple[str, str, dict[str, Any]]:
     instance = config.get("instance", "").strip().rstrip("/")
     token = config.get("access_token", "").strip()
@@ -989,6 +1086,100 @@ class AppHandler(BaseHTTPRequestHandler):
             meta = fetch_url_metadata(raw_url)
             return json_response(self, meta, status=200 if meta.get("ok") else 400)
 
+        if parsed.path == "/api/facebook/connect-url":
+            ok, payload = build_facebook_auth_url(self)
+            return json_response(self, payload, status=200 if ok else 400)
+
+        if parsed.path == "/api/facebook/connect-result":
+            qs = parse_qs(parsed.query)
+            state = (qs.get("state", [""])[0] or "").strip()
+            if not state:
+                return json_response(self, {"error": "state zorunlu"}, status=400)
+            cleanup_oauth_sessions()
+            session = FACEBOOK_OAUTH_SESSIONS.get(state)
+            if not session:
+                return json_response(self, {"error": "state bulunamadi veya zamani doldu"}, status=404)
+            pages = [{"id": p.get("id", ""), "name": p.get("name", "")} for p in session.get("pages", [])]
+            return json_response(
+                self,
+                {
+                    "state": state,
+                    "status": session.get("status", "pending"),
+                    "error": session.get("error", ""),
+                    "pages": pages,
+                },
+            )
+
+        if parsed.path == "/auth/facebook/callback":
+            qs = parse_qs(parsed.query)
+            state = (qs.get("state", [""])[0] or "").strip()
+            code = (qs.get("code", [""])[0] or "").strip()
+            err_reason = (qs.get("error_description", [""])[0] or qs.get("error_message", [""])[0] or qs.get("error", [""])[0] or "").strip()
+            cleanup_oauth_sessions()
+            base = get_effective_base_url(self) or "https://social-publisher.onrender.com"
+            redirect_base = f"{base}/"
+            if not state or state not in FACEBOOK_OAUTH_SESSIONS:
+                self.send_response(302)
+                self.send_header("Location", f"{redirect_base}?fb_connect_status=error&fb_connect_error=invalid_state")
+                self.end_headers()
+                return
+            session = FACEBOOK_OAUTH_SESSIONS[state]
+            if err_reason:
+                session["status"] = "error"
+                session["error"] = err_reason
+                self.send_response(302)
+                self.send_header("Location", f"{redirect_base}?fb_connect_status=error&fb_connect_state={state}")
+                self.end_headers()
+                return
+            if not code:
+                session["status"] = "error"
+                session["error"] = "code yok"
+                self.send_response(302)
+                self.send_header("Location", f"{redirect_base}?fb_connect_status=error&fb_connect_state={state}")
+                self.end_headers()
+                return
+
+            _, missing, redirect_uri = facebook_connect_enabled(self)
+            if missing:
+                session["status"] = "error"
+                session["error"] = f"env eksik: {', '.join(missing)}"
+                self.send_response(302)
+                self.send_header("Location", f"{redirect_base}?fb_connect_status=error&fb_connect_state={state}")
+                self.end_headers()
+                return
+
+            tok_status, tok_resp = facebook_exchange_code_for_user_token(code, redirect_uri)
+            if not (200 <= tok_status < 300):
+                session["status"] = "error"
+                session["error"] = json.dumps({"step": "token_exchange", "status": tok_status, "detail": tok_resp}, ensure_ascii=False)
+                self.send_response(302)
+                self.send_header("Location", f"{redirect_base}?fb_connect_status=error&fb_connect_state={state}")
+                self.end_headers()
+                return
+
+            user_token = str(tok_resp.get("access_token", "")).strip()
+            page_status, page_resp = facebook_fetch_pages(user_token)
+            if not (200 <= page_status < 300):
+                session["status"] = "error"
+                session["error"] = json.dumps({"step": "me/accounts", "status": page_status, "detail": page_resp}, ensure_ascii=False)
+                self.send_response(302)
+                self.send_header("Location", f"{redirect_base}?fb_connect_status=error&fb_connect_state={state}")
+                self.end_headers()
+                return
+
+            pages = page_resp.get("data", []) or []
+            session["status"] = "ok"
+            session["error"] = ""
+            session["pages"] = [
+                {"id": str(p.get("id", "")).strip(), "name": str(p.get("name", "")).strip(), "access_token": str(p.get("access_token", "")).strip()}
+                for p in pages
+                if p.get("id") and p.get("access_token")
+            ]
+            self.send_response(302)
+            self.send_header("Location", f"{redirect_base}?fb_connect_status=ok&fb_connect_state={state}&provider=facebook")
+            self.end_headers()
+            return
+
         if parsed.path == "/api/provider-config":
             qs = parse_qs(parsed.query)
             provider_key = (qs.get("provider", [""])[0] or "").strip()
@@ -1092,6 +1283,34 @@ class AppHandler(BaseHTTPRequestHandler):
                     )
                 status, detail = test_provider(provider_key, config)
                 return json_response(self, {"provider_key": provider_key, "status": status, "detail": detail})
+            except Exception as exc:
+                return json_response(self, {"error": str(exc)}, status=500)
+
+        if parsed.path == "/api/facebook/select-page":
+            try:
+                body = parse_json_body(self)
+                state = str(body.get("state", "")).strip()
+                page_id = str(body.get("page_id", "")).strip()
+                if not state or not page_id:
+                    return json_response(self, {"error": "state ve page_id zorunlu"}, status=400)
+                cleanup_oauth_sessions()
+                session = FACEBOOK_OAUTH_SESSIONS.get(state)
+                if not session:
+                    return json_response(self, {"error": "state bulunamadi veya zamani doldu"}, status=404)
+                page = None
+                for p in session.get("pages", []):
+                    if str(p.get("id", "")).strip() == page_id:
+                        page = p
+                        break
+                if not page:
+                    return json_response(self, {"error": "page bulunamadi"}, status=404)
+                config = {
+                    "page_id": str(page.get("id", "")).strip(),
+                    "page_access_token": str(page.get("access_token", "")).strip(),
+                    "page_name": str(page.get("name", "")).strip(),
+                }
+                db_set_provider_config("facebook", normalize_provider_config("facebook", config))
+                return json_response(self, {"ok": True, "page_id": config["page_id"], "page_name": config.get("page_name", "")})
             except Exception as exc:
                 return json_response(self, {"error": str(exc)}, status=500)
 
