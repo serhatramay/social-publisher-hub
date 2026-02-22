@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Social Publisher</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <section class="panel">
+        <h1>Social Publisher</h1>
+        <p>URL + başlık ile çoklu sosyal ağ paylaşımı.</p>
+
+        <form id="publish-form">
+          <label>Başlık</label>
+          <input id="title" required placeholder="Yeni içerik başlığı" />
+
+          <label>URL</label>
+          <input id="url" required placeholder="https://example.com/yazi" />
+
+          <label>Açıklama (opsiyonel)</label>
+          <textarea id="text_body" rows="3" placeholder="Kısa metin"></textarea>
+
+          <label>Görsel URL (opsiyonel)</label>
+          <input id="image_url" placeholder="https://.../image.jpg" />
+
+          <label>Platformlar</label>
+          <div id="provider-list" class="provider-list"></div>
+
+          <button type="submit">Paylaşımı Başlat</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Provider Config</h2>
+        <p>Seçtiğin provider için JSON config girip kaydedebilirsin.</p>
+        <label>Provider</label>
+        <select id="provider-select"></select>
+        <button id="load-template" type="button">Template Doldur</button>
+        <textarea id="provider-config" rows="10" placeholder='{"access_token":"..."}'></textarea>
+        <button id="save-config" type="button">Config Kaydet</button>
+      </section>
+
+      <section class="panel">
+        <h2>Son Gönderimler</h2>
+        <div id="logs" class="logs"></div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
