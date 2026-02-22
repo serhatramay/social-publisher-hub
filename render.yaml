@@ -4,6 +4,6 @@ services:
           env: python
               plan: free
                   region: frankfurt
-                      buildCommand: "pip install flask"
+                      buildCommand: "echo build done"
                           startCommand: python server.py
                               autoDeploy: true
