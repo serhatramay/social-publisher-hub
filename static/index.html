@@ -38,11 +38,15 @@
 
       <section class="panel">
         <h2>Provider Config</h2>
-        <p>Seçtiğin provider için JSON config girip kaydedebilirsin.</p>
+        <p>Phase 1 platformlar için kullanıcı adı/şifre/token alanlarıyla bağlantı kur. JSON alanı sadece ileri seviye/fallback içindir.</p>
         <label>Provider</label>
         <select id="provider-select"></select>
-        <button id="load-template" type="button">Template Doldur</button>
-        <textarea id="provider-config" rows="10" placeholder='{"access_token":"..."}'></textarea>
+        <div id="provider-form-fields" class="provider-form-fields"></div>
+        <details class="advanced-config">
+          <summary>Gelişmiş (JSON config)</summary>
+          <button id="load-template" type="button">Template Doldur</button>
+          <textarea id="provider-config" rows="10" placeholder='{"access_token":"..."}'></textarea>
+        </details>
         <button id="save-config" type="button">Config Kaydet</button>
         <button id="test-config" type="button">Bağlantıyı Test Et</button>
       </section>

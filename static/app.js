@@ -1,10 +1,27 @@
 const providerListEl = document.getElementById('provider-list');
 const providerSelectEl = document.getElementById('provider-select');
 const providerConfigEl = document.getElementById('provider-config');
+const providerFormFieldsEl = document.getElementById('provider-form-fields');
 const logsEl = document.getElementById('logs');
 const publishChecksEl = document.getElementById('publish-checks');
 
 let providers = [];
+let providerTemplates = {};
+
+const providerFieldSchemas = {
+  bluesky: [
+    { key: 'identifier', label: 'Email veya Handle', placeholder: 'ornek@site.com veya kullanici.bsky.social' },
+    { key: 'app_password', label: 'App Password', placeholder: 'xxxx-xxxx-xxxx-xxxx', type: 'password' },
+  ],
+  mastodon: [
+    { key: 'instance', label: 'Mastodon Instance', placeholder: 'https://mastodon.social' },
+    { key: 'access_token', label: 'Access Token', placeholder: 'Mastodon access token', type: 'password' },
+  ],
+  facebook: [
+    { key: 'page_id', label: 'Facebook Page ID', placeholder: '1234567890' },
+    { key: 'page_access_token', label: 'Page Access Token', placeholder: 'EAAB...', type: 'password' },
+  ],
+};
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -16,6 +33,83 @@ async function api(path, opts = {}) {
     throw new Error(body || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+function hasGuidedForm(providerKey) {
+  return Array.isArray(providerFieldSchemas[providerKey]);
+}
+
+function getSelectedProviderKey() {
+  return providerSelectEl.value;
+}
+
+function renderProviderConfigFields(providerKey, values = {}) {
+  providerFormFieldsEl.innerHTML = '';
+  const schema = providerFieldSchemas[providerKey];
+
+  if (!schema) {
+    const info = document.createElement('div');
+    info.className = 'provider-form-help';
+    info.textContent = 'Bu provider için henüz sade form yok. Gelişmiş (JSON config) alanını kullan.';
+    providerFormFieldsEl.appendChild(info);
+    return;
+  }
+
+  const help = document.createElement('div');
+  help.className = 'provider-form-help';
+  help.textContent = 'Alanları doldur, Config Kaydet de, sonra Bağlantıyı Test Et.';
+  providerFormFieldsEl.appendChild(help);
+
+  schema.forEach((field) => {
+    const label = document.createElement('label');
+    label.textContent = field.label;
+    const input = document.createElement('input');
+    input.type = field.type || 'text';
+    input.placeholder = field.placeholder || '';
+    input.value = values[field.key] || '';
+    input.dataset.configKey = field.key;
+    input.autocomplete = 'off';
+    providerFormFieldsEl.appendChild(label);
+    providerFormFieldsEl.appendChild(input);
+  });
+}
+
+function collectGuidedConfig(providerKey) {
+  if (!hasGuidedForm(providerKey)) return null;
+  const config = {};
+  const inputs = providerFormFieldsEl.querySelectorAll('input[data-config-key]');
+  inputs.forEach((input) => {
+    config[input.dataset.configKey] = input.value.trim();
+  });
+  return config;
+}
+
+function validateGuidedConfig(providerKey, config) {
+  if (!hasGuidedForm(providerKey)) return { ok: true, missing: [] };
+  const missing = [];
+  providerFieldSchemas[providerKey].forEach((field) => {
+    if (!String(config[field.key] || '').trim()) missing.push(field.label);
+  });
+  return { ok: missing.length === 0, missing };
+}
+
+async function loadProviderConfigIntoEditor(providerKey) {
+  try {
+    const [templateResp, configResp] = await Promise.all([
+      api(`/api/provider-config-template?provider=${encodeURIComponent(providerKey)}`),
+      api(`/api/provider-config?provider=${encodeURIComponent(providerKey)}`),
+    ]);
+    const template = templateResp.template || {};
+    const current = configResp.config || {};
+    providerTemplates[providerKey] = template;
+    const merged = { ...template, ...current };
+    renderProviderConfigFields(providerKey, merged);
+    providerConfigEl.value = JSON.stringify(merged, null, 2);
+  } catch (err) {
+    renderProviderConfigFields(providerKey, {});
+    providerConfigEl.value = '{}';
+    alert(`Config yükleme hatası: ${err.message}`);
+  }
 }
 
 function renderProviders() {
@@ -50,6 +144,10 @@ function renderProviders() {
     opt.textContent = `${p.label} (${p.key})`;
     providerSelectEl.appendChild(opt);
   });
+
+  if (providerSelectEl.options.length && !providerSelectEl.value) {
+    providerSelectEl.selectedIndex = 0;
+  }
 }
 
 function selectedProviders() {
@@ -106,6 +204,9 @@ async function loadProviders() {
   const data = await api('/api/providers');
   providers = data.items || [];
   renderProviders();
+  if (providerSelectEl.value) {
+    await loadProviderConfigIntoEditor(providerSelectEl.value);
+  }
 }
 
 async function loadLogs() {
@@ -143,19 +244,31 @@ document.getElementById('publish-form').addEventListener('submit', async (e) => 
 });
 
 document.getElementById('load-template').addEventListener('click', async () => {
-  const provider = providerSelectEl.value;
+  const provider = getSelectedProviderKey();
   try {
     const data = await api(`/api/provider-config-template?provider=${encodeURIComponent(provider)}`);
     providerConfigEl.value = JSON.stringify(data.template || {}, null, 2);
+    renderProviderConfigFields(provider, data.template || {});
   } catch (err) {
     alert(`Template alınamadı: ${err.message}`);
   }
 });
 
 document.getElementById('save-config').addEventListener('click', async () => {
-  const provider = providerSelectEl.value;
+  const provider = getSelectedProviderKey();
   try {
-    const config = JSON.parse(providerConfigEl.value || '{}');
+    let config;
+    if (hasGuidedForm(provider)) {
+      config = collectGuidedConfig(provider);
+      const check = validateGuidedConfig(provider, config);
+      if (!check.ok) {
+        alert(`Eksik alanlar: ${check.missing.join(', ')}`);
+        return;
+      }
+      providerConfigEl.value = JSON.stringify(config, null, 2);
+    } else {
+      config = JSON.parse(providerConfigEl.value || '{}');
+    }
     await api('/api/provider-config', {
       method: 'POST',
       body: JSON.stringify({ provider_key: provider, config, strict: false }),
@@ -168,7 +281,7 @@ document.getElementById('save-config').addEventListener('click', async () => {
 });
 
 document.getElementById('test-config').addEventListener('click', async () => {
-  const provider = providerSelectEl.value;
+  const provider = getSelectedProviderKey();
   try {
     const result = await api('/api/provider-test', {
       method: 'POST',
@@ -182,6 +295,12 @@ document.getElementById('test-config').addEventListener('click', async () => {
   } catch (err) {
     alert(`Test hatası: ${err.message}`);
   }
+});
+
+providerSelectEl.addEventListener('change', async () => {
+  const provider = getSelectedProviderKey();
+  if (!provider) return;
+  await loadProviderConfigIntoEditor(provider);
 });
 
 (async function init() {

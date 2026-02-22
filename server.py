@@ -781,6 +781,13 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/deliveries":
             return json_response(self, {"items": db_recent_deliveries()})
 
+        if parsed.path == "/api/provider-config":
+            qs = parse_qs(parsed.query)
+            provider_key = (qs.get("provider", [""])[0] or "").strip()
+            if not provider_key:
+                return json_response(self, {"error": "provider param zorunlu"}, status=400)
+            return json_response(self, {"provider_key": provider_key, "config": db_get_provider_config(provider_key)})
+
         if parsed.path == "/api/provider-config-template":
             qs = parse_qs(parsed.query)
             provider_key = (qs.get("provider", [""])[0] or "").strip()

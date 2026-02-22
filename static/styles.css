@@ -164,6 +164,32 @@ button:hover {
   background: #fbfbfb;
 }
 
+.provider-form-fields {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.provider-form-help {
+  font-size: 12px;
+  color: var(--muted);
+  margin: -4px 0 8px;
+}
+
+.advanced-config {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 12px;
+  background: #fcfbf7;
+}
+
+.advanced-config summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
 .logs {
   display: grid;
   gap: 8px;
