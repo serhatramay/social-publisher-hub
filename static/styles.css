@@ -150,6 +150,16 @@ button:hover {
   margin-bottom: 14px;
 }
 
+.quick-note {
+  font-size: 13px;
+  color: #24574e;
+  background: #edf8f4;
+  border: 1px solid #cce8de;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 14px;
+}
+
 .checks {
   font-size: 12px;
   color: var(--muted);
@@ -162,6 +172,18 @@ button:hover {
   padding: 8px;
   margin-bottom: 6px;
   background: #fbfbfb;
+}
+
+.check-item.ready {
+  border-style: solid;
+  border-color: #cae9d5;
+  background: #f4fff7;
+}
+
+.check-item.blocked {
+  border-style: solid;
+  border-color: #f1d0d0;
+  background: #fff7f7;
 }
 
 .provider-form-fields {

@@ -10,6 +10,11 @@ const urlInputEl = document.getElementById('url');
 let providers = [];
 let providerTemplates = {};
 let pendingFacebookState = null;
+let urlMetaFetchTimer = null;
+let lastMetaFetchUrl = '';
+
+const DEFAULT_SELECTED_PROVIDERS = ['bluesky', 'mastodon'];
+const SELECTED_PROVIDERS_STORAGE_KEY = 'social_publisher_selected_providers_v1';
 
 const providerFieldSchemas = {
   bluesky: [
@@ -44,6 +49,26 @@ function hasGuidedForm(providerKey) {
 
 function getSelectedProviderKey() {
   return providerSelectEl.value;
+}
+
+function getSavedSelectedProviders() {
+  try {
+    const raw = localStorage.getItem(SELECTED_PROVIDERS_STORAGE_KEY);
+    if (!raw) return [...DEFAULT_SELECTED_PROVIDERS];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [...DEFAULT_SELECTED_PROVIDERS];
+    return parsed;
+  } catch (_) {
+    return [...DEFAULT_SELECTED_PROVIDERS];
+  }
+}
+
+function saveSelectedProviders(keys) {
+  try {
+    localStorage.setItem(SELECTED_PROVIDERS_STORAGE_KEY, JSON.stringify(keys));
+  } catch (_) {
+    // ignore localStorage failures
+  }
 }
 
 function setSearchParamsWithoutReload(params) {
@@ -94,7 +119,7 @@ function renderProviderConnectPanel(providerKey, providerConfig = {}) {
   status.className = 'provider-connect-status';
   status.textContent = providerConfig.page_name
     ? `Bağlı sayfa: ${providerConfig.page_name} (${providerConfig.page_id || ''})`
-    : 'Kolay yöntem: "Facebook ile Bağlan" ile page ve token otomatik alınır.';
+    : 'Kolay yöntem (opsiyonel): "Facebook ile Bağlan" ile page ve token otomatik alınır.';
   providerConnectPanelEl.appendChild(status);
 
   const actions = document.createElement('div');
@@ -204,6 +229,7 @@ async function loadProviderConfigIntoEditor(providerKey) {
 function renderProviders() {
   providerListEl.innerHTML = '';
   providerSelectEl.innerHTML = '';
+  const selectedSet = new Set(getSavedSelectedProviders());
 
   providers.forEach((p) => {
     const wrapper = document.createElement('div');
@@ -212,7 +238,7 @@ function renderProviders() {
     const id = `provider-${p.key}`;
     wrapper.innerHTML = `
       <label>
-        <input type="checkbox" id="${id}" value="${p.key}" />
+        <input type="checkbox" id="${id}" value="${p.key}" ${selectedSet.has(p.key) ? 'checked' : ''} />
         ${p.label}
       </label>
       <div class="provider-meta">
@@ -260,6 +286,7 @@ async function fetchUrlMetaAndFill(force = false) {
     return;
   }
   try {
+    lastMetaFetchUrl = url;
     const data = await api(`/api/url-meta?url=${encodeURIComponent(url)}`);
     if (!data.ok) {
       alert('URL metadata alınamadı.');
@@ -286,13 +313,23 @@ async function fetchUrlMetaAndFill(force = false) {
   }
 }
 
+function scheduleAutoUrlMetaFetch() {
+  const url = urlInputEl.value.trim();
+  if (!url || !/^https?:\/\//i.test(url)) return;
+  if (url === lastMetaFetchUrl) return;
+  clearTimeout(urlMetaFetchTimer);
+  urlMetaFetchTimer = setTimeout(async () => {
+    await fetchUrlMetaAndFill(false);
+  }, 700);
+}
+
 function renderPublishChecks(items) {
   publishChecksEl.innerHTML = '';
   if (!items || !items.length) return;
   items.forEach((it) => {
     const ok = it.config_ok && it.post_ok;
     const div = document.createElement('div');
-    div.className = 'check-item';
+    div.className = `check-item ${ok ? 'ready' : 'blocked'}`;
     div.innerHTML = `
       <strong>${it.provider_key}</strong> - ${ok ? 'hazır' : 'hazır değil'} (P${it.phase || '?'}, ${it.status || 'unknown'})
       ${it.missing_config?.length ? `<div>Eksik config: ${it.missing_config.join(', ')}</div>` : ''}
@@ -339,8 +376,13 @@ async function loadLogs() {
 document.getElementById('publish-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const payload = publishPayloadFromForm();
+  const submitBtn = e.target.querySelector('button[type="submit"]');
 
   try {
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Paylaşılıyor...';
+    }
     const precheck = await api('/api/publish-validate', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -356,12 +398,21 @@ document.getElementById('publish-form').addEventListener('submit', async (e) => 
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    const failed = (result.results || []).filter((x) => x.status !== 'ok').length;
-    alert(`Gönderim tamamlandı. Post ID: ${result.post_id}. Başarısız: ${failed}`);
+    const okItems = (result.results || []).filter((x) => x.status === 'ok').map((x) => x.provider_key);
+    const failItems = (result.results || []).filter((x) => x.status !== 'ok').map((x) => x.provider_key);
+    const parts = [`Post ID: ${result.post_id}`];
+    if (okItems.length) parts.push(`Başarılı: ${okItems.join(', ')}`);
+    if (failItems.length) parts.push(`Başarısız: ${failItems.join(', ')}`);
+    alert(`Gönderim tamamlandı.\n${parts.join('\n')}`);
     await loadProviders();
     await loadLogs();
   } catch (err) {
     alert(`Hata: ${err.message}`);
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Paylaşımı Başlat';
+    }
   }
 });
 
@@ -429,9 +480,21 @@ providerSelectEl.addEventListener('change', async () => {
   await loadProviderConfigIntoEditor(provider);
 });
 
+providerListEl.addEventListener('change', () => {
+  saveSelectedProviders(selectedProviders());
+});
+
 urlInputEl.addEventListener('blur', async () => {
   if (!urlInputEl.value.trim()) return;
   await fetchUrlMetaAndFill(false);
+});
+
+urlInputEl.addEventListener('input', () => {
+  scheduleAutoUrlMetaFetch();
+});
+
+urlInputEl.addEventListener('paste', () => {
+  setTimeout(scheduleAutoUrlMetaFetch, 50);
 });
 
 async function handleFacebookConnectCallbackIfAny() {
