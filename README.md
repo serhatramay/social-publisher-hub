@@ -10,6 +10,14 @@ URL + başlık + metin ile çoklu sosyal ağ paylaşımı yapan temel bir servis
 - Basit web paneli
 - Render deploy dosyası (`render.yaml`)
 
+## Fazlar (Yol Haritasi)
+
+- Phase 1 (hedef: stabil): Mastodon, Bluesky, Facebook Page
+- Phase 2 (beta): LinkedIn, Pinterest
+- Phase 3 (beta): Instagram, Reddit
+- Phase 4 (placeholder): TikTok, Tumblr
+- Phase 5 (operasyon): queue, retry, zamanlama, rate-limit yonetimi
+
 ## Dahil edilen providerlar
 
 - LinkedIn
@@ -23,7 +31,7 @@ URL + başlık + metin ile çoklu sosyal ağ paylaşımı yapan temel bir servis
 - Tumblr (placeholder)
 - Digg (manual/share fallback)
 
-Not: `TikTok`, `Tumblr`, `Digg` tarafında bu MVP'de tam otomatik yayın yerine kısıt/placeholder akışı var.
+Not: `TikTok`, `Tumblr`, `Digg` tarafında bu MVP'de tam otomatik yayın yerine kısıt/placeholder/manual akışı var.
 
 ## Lokal çalıştırma
 
@@ -41,6 +49,8 @@ Arayüz: [http://127.0.0.1:8081](http://127.0.0.1:8081)
 - `GET /api/deliveries`
 - `POST /api/provider-config`
 - `GET /api/provider-config-template?provider=<key>`
+- `POST /api/provider-test`
+- `POST /api/publish-validate`
 - `POST /api/publish`
 
 ## Örnek publish

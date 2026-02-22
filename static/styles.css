@@ -85,8 +85,17 @@ button:hover {
   background: #fcfcf9;
 }
 
+.provider-item.phase-1 {
+  border-color: #8ecdbf;
+  background: #f4fffb;
+}
+
 .provider-item.manual {
   background: #fff6f3;
+}
+
+.provider-item.placeholder {
+  opacity: 0.75;
 }
 
 .provider-item label {
@@ -98,6 +107,61 @@ button:hover {
   margin-top: 6px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  margin-right: 4px;
+  background: #ececec;
+  color: #333;
+}
+
+.badge.phase {
+  background: #e3f5ef;
+  color: #115c54;
+}
+
+.badge.stable {
+  background: #e8f7ea;
+  color: #1f7a3f;
+}
+
+.badge.beta {
+  background: #fff6d8;
+  color: #8a6400;
+}
+
+.badge.placeholder,
+.badge.manual {
+  background: #f7e6e6;
+  color: #8f2a2a;
+}
+
+.phase-note {
+  font-size: 13px;
+  color: var(--muted);
+  background: #faf7ee;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 14px;
+}
+
+.checks {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.check-item {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 6px;
+  background: #fbfbfb;
 }
 
 .logs {

@@ -10,7 +10,10 @@
     <main class="container">
       <section class="panel">
         <h1>Social Publisher</h1>
-        <p>URL + başlık ile çoklu sosyal ağ paylaşımı.</p>
+        <p>URL + başlık ile çoklu sosyal ağ paylaşımı. Öncelik: Phase 1 (Mastodon, Bluesky, Facebook Page).</p>
+        <div class="phase-note">
+          <strong>Yol Haritası:</strong> P1 Mastodon/Bluesky/Facebook -> P2 LinkedIn/Pinterest -> P3 Instagram/Reddit -> P4 TikTok/Tumblr -> P5 queue/retry/operasyon.
+        </div>
 
         <form id="publish-form">
           <label>Başlık</label>
@@ -27,6 +30,7 @@
 
           <label>Platformlar</label>
           <div id="provider-list" class="provider-list"></div>
+          <div id="publish-checks" class="checks"></div>
 
           <button type="submit">Paylaşımı Başlat</button>
         </form>
@@ -40,6 +44,7 @@
         <button id="load-template" type="button">Template Doldur</button>
         <textarea id="provider-config" rows="10" placeholder='{"access_token":"..."}'></textarea>
         <button id="save-config" type="button">Config Kaydet</button>
+        <button id="test-config" type="button">Bağlantıyı Test Et</button>
       </section>
 
       <section class="panel">

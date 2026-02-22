@@ -2,6 +2,7 @@ const providerListEl = document.getElementById('provider-list');
 const providerSelectEl = document.getElementById('provider-select');
 const providerConfigEl = document.getElementById('provider-config');
 const logsEl = document.getElementById('logs');
+const publishChecksEl = document.getElementById('publish-checks');
 
 let providers = [];
 
@@ -23,7 +24,7 @@ function renderProviders() {
 
   providers.forEach((p) => {
     const wrapper = document.createElement('div');
-    wrapper.className = `provider-item ${p.mode}`;
+    wrapper.className = `provider-item ${p.mode} ${p.status} phase-${p.phase}`;
 
     const id = `provider-${p.key}`;
     wrapper.innerHTML = `
@@ -32,8 +33,13 @@ function renderProviders() {
         ${p.label}
       </label>
       <div class="provider-meta">
-        mode: ${p.mode} | configured: ${p.configured ? 'yes' : 'no'}
+        <span class="badge phase">P${p.phase}</span>
+        <span class="badge ${p.status}">${p.status}</span>
       </div>
+      <div class="provider-meta">
+        mode: ${p.mode} | configured: ${p.configured ? 'yes' : 'no'} | ready: ${p.runtime_ready ? 'yes' : 'no'}
+      </div>
+      ${p.missing_config && p.missing_config.length ? `<div class="provider-meta">Eksik: ${p.missing_config.join(', ')}</div>` : ''}
       <div class="provider-meta">${p.notes || ''}</div>
     `;
 
@@ -43,6 +49,36 @@ function renderProviders() {
     opt.value = p.key;
     opt.textContent = `${p.label} (${p.key})`;
     providerSelectEl.appendChild(opt);
+  });
+}
+
+function selectedProviders() {
+  return Array.from(providerListEl.querySelectorAll('input[type="checkbox"]:checked')).map((x) => x.value);
+}
+
+function publishPayloadFromForm() {
+  return {
+    title: document.getElementById('title').value.trim(),
+    url: document.getElementById('url').value.trim(),
+    text_body: document.getElementById('text_body').value.trim(),
+    image_url: document.getElementById('image_url').value.trim(),
+    providers: selectedProviders(),
+  };
+}
+
+function renderPublishChecks(items) {
+  publishChecksEl.innerHTML = '';
+  if (!items || !items.length) return;
+  items.forEach((it) => {
+    const ok = it.config_ok && it.post_ok;
+    const div = document.createElement('div');
+    div.className = 'check-item';
+    div.innerHTML = `
+      <strong>${it.provider_key}</strong> - ${ok ? 'hazır' : 'hazır değil'} (P${it.phase || '?'}, ${it.status || 'unknown'})
+      ${it.missing_config?.length ? `<div>Eksik config: ${it.missing_config.join(', ')}</div>` : ''}
+      ${it.post_issues?.length ? `<div>İçerik sorunu: ${it.post_issues.join(', ')}</div>` : ''}
+    `;
+    publishChecksEl.appendChild(div);
   });
 }
 
@@ -79,24 +115,26 @@ async function loadLogs() {
 
 document.getElementById('publish-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-
-  const selected = Array.from(providerListEl.querySelectorAll('input[type="checkbox"]:checked'))
-    .map((x) => x.value);
-
-  const payload = {
-    title: document.getElementById('title').value.trim(),
-    url: document.getElementById('url').value.trim(),
-    text_body: document.getElementById('text_body').value.trim(),
-    image_url: document.getElementById('image_url').value.trim(),
-    providers: selected,
-  };
+  const payload = publishPayloadFromForm();
 
   try {
+    const precheck = await api('/api/publish-validate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    renderPublishChecks(precheck.items || []);
+    const blocked = (precheck.items || []).filter((x) => !x.config_ok || !x.post_ok);
+    if (blocked.length) {
+      alert(`Paylaşım durduruldu. ${blocked.length} provider hazır değil.`);
+      return;
+    }
+
     const result = await api('/api/publish', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    alert(`Gönderim tamamlandı. Post ID: ${result.post_id}`);
+    const failed = (result.results || []).filter((x) => x.status !== 'ok').length;
+    alert(`Gönderim tamamlandı. Post ID: ${result.post_id}. Başarısız: ${failed}`);
     await loadProviders();
     await loadLogs();
   } catch (err) {
@@ -120,12 +158,29 @@ document.getElementById('save-config').addEventListener('click', async () => {
     const config = JSON.parse(providerConfigEl.value || '{}');
     await api('/api/provider-config', {
       method: 'POST',
-      body: JSON.stringify({ provider_key: provider, config }),
+      body: JSON.stringify({ provider_key: provider, config, strict: false }),
     });
-    alert('Config kaydedildi');
+    alert('Config kaydedildi. Sonraki adım: Bağlantıyı Test Et');
     await loadProviders();
   } catch (err) {
     alert(`Config kaydetme hatası: ${err.message}`);
+  }
+});
+
+document.getElementById('test-config').addEventListener('click', async () => {
+  const provider = providerSelectEl.value;
+  try {
+    const result = await api('/api/provider-test', {
+      method: 'POST',
+      body: JSON.stringify({ provider_key: provider }),
+    });
+    if (result.status === 'ok') {
+      alert(`Test başarılı: ${provider}`);
+    } else {
+      alert(`Test başarısız (${provider}): ${JSON.stringify(result.detail)}`);
+    }
+  } catch (err) {
+    alert(`Test hatası: ${err.message}`);
   }
 });
 

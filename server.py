@@ -18,6 +18,90 @@ DB_PATH = BASE_DIR / "social_publisher.db"
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8081"))
 
+PROVIDER_SPECS: dict[str, dict[str, Any]] = {
+    "mastodon": {
+        "label": "Mastodon",
+        "mode": "api",
+        "phase": 1,
+        "status": "stable",
+        "notes": "Instance + access token gerekli",
+        "required_config": ["instance", "access_token"],
+    },
+    "bluesky": {
+        "label": "Bluesky",
+        "mode": "api",
+        "phase": 1,
+        "status": "stable",
+        "notes": "Identifier (email/handle) + app password gerekli",
+        "required_config": ["identifier", "app_password"],
+    },
+    "facebook": {
+        "label": "Facebook Page",
+        "mode": "api",
+        "phase": 1,
+        "status": "stable",
+        "notes": "Page ID + page access token gerekli",
+        "required_config": ["page_id", "page_access_token"],
+    },
+    "linkedin": {
+        "label": "LinkedIn",
+        "mode": "api",
+        "phase": 2,
+        "status": "beta",
+        "notes": "Access token + author URN gerekli",
+        "required_config": ["access_token", "author_urn"],
+    },
+    "pinterest": {
+        "label": "Pinterest",
+        "mode": "api",
+        "phase": 2,
+        "status": "beta",
+        "notes": "Board ID + access token gerekli",
+        "required_config": ["board_id", "access_token"],
+    },
+    "instagram": {
+        "label": "Instagram",
+        "mode": "api",
+        "phase": 3,
+        "status": "beta",
+        "notes": "Business account + Graph token (image_url zorunlu)",
+        "required_config": ["ig_user_id", "access_token"],
+        "requires_image": True,
+    },
+    "reddit": {
+        "label": "Reddit",
+        "mode": "api",
+        "phase": 3,
+        "status": "beta",
+        "notes": "OAuth app + refresh token gerekli",
+        "required_config": ["client_id", "client_secret", "refresh_token", "subreddit"],
+    },
+    "tiktok": {
+        "label": "TikTok",
+        "mode": "api",
+        "phase": 4,
+        "status": "placeholder",
+        "notes": "Content Posting API onayi gerekli (placeholder)",
+        "required_config": ["access_token", "open_id", "video_url"],
+    },
+    "tumblr": {
+        "label": "Tumblr",
+        "mode": "api",
+        "phase": 4,
+        "status": "placeholder",
+        "notes": "OAuth 1.0a imza akisi gerekli (placeholder)",
+        "required_config": ["consumer_key", "consumer_secret", "token", "token_secret", "blog_identifier"],
+    },
+    "digg": {
+        "label": "Digg",
+        "mode": "manual",
+        "phase": 5,
+        "status": "manual",
+        "notes": "Resmi guncel post API yok, manuel/share fallback",
+        "required_config": [],
+    },
+}
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -74,27 +158,14 @@ def init_db() -> None:
         """
     )
 
-    providers = [
-        ("linkedin", "LinkedIn", "api", "Access token + author URN gerekli"),
-        ("facebook", "Facebook Page", "api", "Page ID + page access token gerekli"),
-        ("pinterest", "Pinterest", "api", "Board ID + access token gerekli"),
-        ("tiktok", "TikTok", "api", "Content Posting API onayi gerekli"),
-        ("mastodon", "Mastodon", "api", "Instance + access token gerekli"),
-        ("bluesky", "Bluesky", "api", "Identifier + app password gerekli"),
-        ("reddit", "Reddit", "api", "OAuth app + refresh token gerekli"),
-        ("instagram", "Instagram", "api", "Business account + Graph token"),
-        ("tumblr", "Tumblr", "api", "OAuth tokenlari gerekli"),
-        ("digg", "Digg", "manual", "Resmi guncel post API yok, manuel/share fallback"),
-    ]
-
     now = now_iso()
-    for key, label, mode, notes in providers:
+    for key, spec in PROVIDER_SPECS.items():
         cur.execute(
             """
             INSERT OR IGNORE INTO providers(key, label, enabled, mode, notes, created_at, updated_at)
             VALUES (?, ?, 1, ?, ?, ?, ?)
             """,
-            (key, label, mode, notes, now, now),
+            (key, spec["label"], spec["mode"], spec["notes"], now, now),
         )
 
     conn.commit()
@@ -154,6 +225,8 @@ def db_list_providers() -> list[dict[str, Any]]:
     out = []
     for row in rows:
         cfg = configs.get(row["key"], {})
+        spec = PROVIDER_SPECS.get(row["key"], {})
+        validation = validate_provider_config(row["key"], cfg)
         out.append(
             {
                 "key": row["key"],
@@ -161,12 +234,17 @@ def db_list_providers() -> list[dict[str, Any]]:
                 "enabled": bool(row["enabled"]),
                 "mode": row["mode"],
                 "notes": row["notes"],
+                "phase": spec.get("phase", 9),
+                "status": spec.get("status", "unknown"),
+                "required_config": spec.get("required_config", []),
                 "configured": bool(cfg),
+                "runtime_ready": validation["ok"],
+                "missing_config": validation["missing_config"],
                 "config_preview": sorted(list(cfg.keys())),
                 "updated_at": row["updated_at"],
             }
         )
-    return out
+    return sorted(out, key=lambda x: (x["phase"], x["label"]))
 
 
 def db_set_provider_config(provider_key: str, config: dict[str, Any]) -> None:
@@ -187,6 +265,50 @@ def db_set_provider_config(provider_key: str, config: dict[str, Any]) -> None:
     )
     conn.commit()
     conn.close()
+
+
+def normalize_provider_config(provider_key: str, config: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in config.items():
+        if isinstance(value, str):
+            out[key] = value.strip()
+        else:
+            out[key] = value
+
+    if provider_key == "bluesky":
+        identifier = str(out.get("identifier", "")).strip()
+        if identifier.startswith("@"):
+            identifier = identifier[1:]
+        out["identifier"] = identifier
+    if provider_key == "mastodon":
+        instance = str(out.get("instance", "")).strip()
+        if instance and not instance.startswith("http://") and not instance.startswith("https://"):
+            instance = "https://" + instance
+        out["instance"] = instance.rstrip("/")
+    return out
+
+
+def validate_provider_config(provider_key: str, config: dict[str, Any]) -> dict[str, Any]:
+    spec = PROVIDER_SPECS.get(provider_key, {})
+    required = spec.get("required_config", [])
+    missing: list[str] = []
+    for key in required:
+        value = config.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing.append(key)
+    return {"ok": len(missing) == 0, "missing_config": missing}
+
+
+def validate_publish_request(provider_key: str, post: dict[str, str]) -> dict[str, Any]:
+    spec = PROVIDER_SPECS.get(provider_key, {})
+    issues: list[str] = []
+    if spec.get("requires_image") and not post.get("image_url"):
+        issues.append("image_url gerekli")
+    if provider_key == "bluesky":
+        text = f"{post.get('title', '')}\n{post.get('url', '')}"
+        if len(text) > 300:
+            issues.append("Bluesky için başlık+URL 300 karakteri aşıyor")
+    return {"ok": len(issues) == 0, "issues": issues}
 
 
 def db_get_provider_config(provider_key: str) -> dict[str, Any]:
@@ -282,6 +404,26 @@ def http_json(method: str, url: str, payload: dict[str, Any], headers: dict[str,
         return 599, {"error": str(exc)}
 
 
+def http_get_json(url: str, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+    req = Request(url, headers=headers, method="GET")
+    try:
+        with urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+            if not raw:
+                return resp.status, {}
+            return resp.status, json.loads(raw)
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="ignore")
+        detail: dict[str, Any] = {"error": str(exc), "body": raw}
+        try:
+            detail["json"] = json.loads(raw)
+        except Exception:
+            pass
+        return exc.code, detail
+    except URLError as exc:
+        return 599, {"error": str(exc)}
+
+
 def http_form(method: str, url: str, form: dict[str, str], headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
     encoded = urlencode(form).encode("utf-8")
     req_headers = {"Content-Type": "application/x-www-form-urlencoded", **headers}
@@ -359,6 +501,49 @@ def post_bluesky(config: dict[str, Any], post: dict[str, str]) -> tuple[str, str
     if 200 <= create_status < 300:
         return "ok", str(create_resp.get("uri", "")), create_resp
     return "failed", "", {"step": "createRecord", "status": create_status, "detail": create_resp}
+
+
+def test_provider(provider_key: str, config: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    if provider_key == "mastodon":
+        instance = str(config.get("instance", "")).strip().rstrip("/")
+        token = str(config.get("access_token", "")).strip()
+        if not instance or not token:
+            return "failed", {"error": "instance ve access_token zorunlu"}
+        status, resp = http_get_json(
+            f"{instance}/api/v1/accounts/verify_credentials",
+            {"Authorization": f"Bearer {token}"},
+        )
+        if 200 <= status < 300:
+            return "ok", {"account": resp.get("acct", ""), "display_name": resp.get("display_name", "")}
+        return "failed", {"step": "verify_credentials", "status": status, "detail": resp}
+    if provider_key == "bluesky":
+        identifier = str(config.get("identifier", "")).strip()
+        app_password = str(config.get("app_password", "")).strip()
+        if not identifier or not app_password:
+            return "failed", {"error": "identifier ve app_password zorunlu"}
+        status, resp = http_json(
+            "POST",
+            "https://bsky.social/xrpc/com.atproto.server.createSession",
+            {"identifier": identifier, "password": app_password},
+            {},
+        )
+        if 200 <= status < 300:
+            return "ok", {"did": resp.get("did", "")}
+        return "failed", {"step": "login", "status": status, "detail": resp}
+    if provider_key == "facebook":
+        token = str(config.get("page_access_token", "")).strip()
+        page_id = str(config.get("page_id", "")).strip()
+        if not token or not page_id:
+            return "failed", {"error": "page_id ve page_access_token zorunlu"}
+        query = urlencode({"fields": "id,name", "access_token": token})
+        status, resp = http_get_json(
+            f"https://graph.facebook.com/v21.0/{page_id}?{query}",
+            {},
+        )
+        if 200 <= status < 300:
+            return "ok", {"page_id": resp.get("id", ""), "page_name": resp.get("name", "")}
+        return "failed", {"step": "page_lookup", "status": status, "detail": resp}
+    return "failed", {"error": "Bu provider için test endpoint'i henüz yok"}
 
 
 def post_linkedin(config: dict[str, Any], post: dict[str, str]) -> tuple[str, str, dict[str, Any]]:
@@ -660,8 +845,71 @@ class AppHandler(BaseHTTPRequestHandler):
                     return json_response(self, {"error": "provider_key zorunlu"}, status=400)
                 if not isinstance(config, dict):
                     return json_response(self, {"error": "config obje olmali"}, status=400)
-                db_set_provider_config(provider_key, config)
-                return json_response(self, {"ok": True})
+                normalized = normalize_provider_config(provider_key, config)
+                validation = validate_provider_config(provider_key, normalized)
+                if not validation["ok"] and body.get("strict", False):
+                    return json_response(
+                        self,
+                        {"error": "Eksik config alanlari", "missing_config": validation["missing_config"]},
+                        status=400,
+                    )
+                db_set_provider_config(provider_key, normalized)
+                return json_response(self, {"ok": True, "validation": validation})
+            except Exception as exc:
+                return json_response(self, {"error": str(exc)}, status=500)
+
+        if parsed.path == "/api/provider-test":
+            try:
+                body = parse_json_body(self)
+                provider_key = str(body.get("provider_key", "")).strip()
+                if not provider_key:
+                    return json_response(self, {"error": "provider_key zorunlu"}, status=400)
+                config = db_get_provider_config(provider_key)
+                validation = validate_provider_config(provider_key, config)
+                if not validation["ok"]:
+                    return json_response(
+                        self,
+                        {
+                            "provider_key": provider_key,
+                            "status": "failed",
+                            "detail": {"error": "Eksik config alanlari", "missing_config": validation["missing_config"]},
+                        },
+                    )
+                status, detail = test_provider(provider_key, config)
+                return json_response(self, {"provider_key": provider_key, "status": status, "detail": detail})
+            except Exception as exc:
+                return json_response(self, {"error": str(exc)}, status=500)
+
+        if parsed.path == "/api/publish-validate":
+            try:
+                body = parse_json_body(self)
+                title = str(body.get("title", "")).strip()
+                url = str(body.get("url", "")).strip()
+                text_body = str(body.get("text_body", "")).strip()
+                image_url = str(body.get("image_url", "")).strip()
+                providers = body.get("providers", [])
+                if not isinstance(providers, list):
+                    providers = []
+                post_payload = {"title": title, "url": url, "text_body": text_body, "image_url": image_url}
+
+                items = []
+                for provider_key in providers:
+                    spec = PROVIDER_SPECS.get(provider_key, {})
+                    cfg = db_get_provider_config(provider_key)
+                    cfg_val = validate_provider_config(provider_key, cfg)
+                    post_val = validate_publish_request(provider_key, post_payload)
+                    items.append(
+                        {
+                            "provider_key": provider_key,
+                            "phase": spec.get("phase"),
+                            "status": spec.get("status"),
+                            "config_ok": cfg_val["ok"],
+                            "missing_config": cfg_val["missing_config"],
+                            "post_ok": post_val["ok"],
+                            "post_issues": post_val["issues"],
+                        }
+                    )
+                return json_response(self, {"ok": True, "items": items})
             except Exception as exc:
                 return json_response(self, {"error": str(exc)}, status=500)
 
@@ -678,6 +926,34 @@ class AppHandler(BaseHTTPRequestHandler):
                     return json_response(self, {"error": "title ve url zorunlu"}, status=400)
                 if not isinstance(providers, list) or not providers:
                     return json_response(self, {"error": "en az bir provider secilmeli"}, status=400)
+                if not (url.startswith("http://") or url.startswith("https://")):
+                    return json_response(self, {"error": "url http/https ile baslamali"}, status=400)
+
+                validation_errors = []
+                for provider_key in providers:
+                    spec = PROVIDER_SPECS.get(provider_key, {})
+                    cfg = db_get_provider_config(provider_key)
+                    cfg_val = validate_provider_config(provider_key, cfg)
+                    post_val = validate_publish_request(
+                        provider_key,
+                        {"title": title, "url": url, "text_body": text_body, "image_url": image_url},
+                    )
+                    if not cfg_val["ok"] or not post_val["ok"]:
+                        validation_errors.append(
+                            {
+                                "provider_key": provider_key,
+                                "phase": spec.get("phase"),
+                                "status": spec.get("status"),
+                                "missing_config": cfg_val["missing_config"],
+                                "post_issues": post_val["issues"],
+                            }
+                        )
+                if validation_errors:
+                    return json_response(
+                        self,
+                        {"error": "Bazi providerlar hazir degil", "validation_errors": validation_errors},
+                        status=400,
+                    )
 
                 post_id = db_save_post(title, url, text_body, image_url)
                 post_payload = {
